@@ -1,0 +1,802 @@
+---
+title: "S1 Code for: *Demography and climate influence sex-specific survival costs of reproduction over 60 years in a free ranging primate population*"
+author: "Eve B Cooper, Lauren JN Brent, Noah Snyder-Mackler & James P Higham"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    highlight: tango
+---
+
+# 1. Data loading and preparation
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+```
+
+Loading Packages
+
+```{r packages, include=TRUE,message=FALSE}
+library(brms) #for all your modelling needs
+library(tidyverse) #for data tidying
+library(ggplot2) #for basic plotting needs
+library(bayesplot) #for plotting Bayesian models easily in ggplot
+library(tidybayes) #even tidier plotting
+library(ggpubr) #format plots into figs for publication
+library(readxl) #sometimes you have to use excel
+```
+
+Operating system and package versions
+
+```{r sessionInfo}
+sessionInfo()
+```
+
+Load all the data we will need:
+
+```{r data load,message=FALSE}
+#Rio Peidras weather station data
+weatherRP <- read_excel("weather_rio_peidras.xlsx")
+
+#import Humacao weather station data
+weatherHum <- read_excel("weatherHum.xlsx")
+
+#import census data files:
+#dates associated with every birth and mating season on Cayo Santiago since 1959
+yearSznSum<-read_excel("yearSznSum.xlsx")  
+#monthly counts of population density
+monthlyCensusDensity<-read_excel("monthlyCensusDensity.xlsx") 
+#sex ratio during each calendar month of the study
+monthlyCensusSexRatio<-read_excel("monthlyCensusSexRatio.xlsx")  
+
+#import monthly survival records for all individuals included in the study:
+survivalData<-read.csv("JAE_survival_data.csv")
+
+#data cleaning:
+#scale survival data (neccessary for some models, see below)
+survivalDataScale<-survivalData %>%
+  mutate(adultsTotal=c(scale(adultsTotal)))%>%
+  mutate(Jdate=c(scale(Jdate)))%>%
+  mutate(age=c(scale(age)))%>%
+  mutate(birthSznSD=c(scale(birthSznSD)))%>%
+  mutate(propFemale=c(scale(propFemale)))%>%
+  mutate(tmax=c(scale(tmax)))%>%
+  mutate(rain=c(scale(rain)))
+```
+
+# 2. Demographic and climatic variables over study period
+
+In order to get a visual assessment of the variation in demographic variables (population density and sex ratio) and climatic variables (temperature and rainfall) over the course of the study period we will graph all these variables across time. We will also graph covariance between population density and sex ratio, and temperature and rainfall, in order to access their covariance.
+
+This code creates Figure 1 in the manuscript:
+
+```{r figure 1: variation across years, warning=FALSE,message=FALSE}
+#demographic variables####
+#plot population density
+Gdens<-ggplot(filter(monthlyCensusDensity,adultsTotal>5),
+              aes(x=year,y=adultsTotal))+ 
+  geom_point(position="jitter")+
+  labs(x="Year",y="Population Size", title="(A) Density")+
+  theme_classic()
+
+#plot sex ratio - females per male
+monthlyCensusSexRatio<-mutate(monthlyCensusSexRatio, ratioFemale=females/males)
+Gsex<-ggplot(filter(monthlyCensusSexRatio,adultsTotal>5),
+             aes(x=year,y=ratioFemale))+
+  geom_hline(yintercept=1,color="red")+
+  geom_point(position="jitter")+
+  labs(x="Year",y="Females per Male", title="(B) Sex ratio")+
+  theme_classic()
+
+#population density vs. sex ratio
+monthlyCensusSum<-left_join(monthlyCensusDensity,
+                            select(monthlyCensusSexRatio,month,ratioFemale),
+                            by="month")
+Gcomp<-ggplot(filter(monthlyCensusSum,adultsTotal>5),
+              aes(x=adultsTotal,y=ratioFemale))+
+  geom_point()+
+  labs(x="Population Size",y="Females per Male",title="(C) Density/Ratio")+
+  theme_classic()
+
+#climatic variables####
+#weather variables each year
+#sort data legnthwise
+birthData<-yearSznSum %>%
+  select(Bszn, temp=meanTempBirth, Prcp =meanPrcpBirth)%>%
+  mutate(season="birth")
+mateData<-yearSznSum %>%
+    select(Bszn, temp=meanTempMate, Prcp =meanPrcpmate)%>%
+    mutate(season="mate")
+fig1Data<-rbind(birthData,mateData)
+
+#temperature
+Gtemp<-ggplot(data=fig1Data,aes(x=Bszn,y=temp,group=season),fill=season)+
+  geom_point(aes(color=season))+
+  geom_smooth(aes(color=season,fill=season),method="lm")+
+  labs(x="Year",y="Temperature (°C)", title="(D) Temperature")+
+  scale_y_continuous(labels=function(x)x/10)+
+  scale_fill_manual(values=c("red3","goldenrod"),name = "Season", 
+                    labels = c( "Birth","Mating"))+
+  scale_color_manual(values=c( "red3","goldenrod"),name = "Season", 
+                     labels = c("Birth","Mating"))+
+  theme_classic()
+
+
+#rainfall
+Gpre<-ggplot(data=fig1Data,aes(x=Bszn,y=Prcp))+
+  geom_point(aes(color=season))+
+  geom_smooth(aes(color=season,fill=season),method="lm")+
+  labs(x="Year",y="Rainfall (mm)", title="(E) Rainfall")+
+  scale_y_continuous(labels=function(x)x/10)+
+  coord_cartesian(ylim=c(0,125))+
+  scale_fill_manual(values=c("red3","goldenrod"),name = "Season", 
+                    labels = c( "Birth","Mating"))+
+  scale_color_manual(values=c( "red3","goldenrod"),name = "Season", 
+                     labels = c("Birth","Mating"))+
+  theme_classic()
+
+#temperature by rainfall
+weatherMonthly<-weatherRP%>%
+  mutate(month=format(date, "%Y/%m"))%>%
+  group_by(month)%>%
+  filter(!is.na(tmax)| !is.na(prcp))%>%
+  summarise(tmax=mean(tmax/10,na.rm=TRUE),prcp=mean(prcp/10,na.rm=TRUE),n=n())
+
+Gweather<-ggplot(data=weatherMonthly,aes(x=tmax,y=prcp))+
+  geom_point()+
+  #geom_smooth(method="lm")+
+  labs(x="Temperature (°C)",y="Rainfall (mm)", title="(F) Temp/Rainfall")+
+  coord_cartesian(ylim=c(0,20))+
+  theme_classic()
+
+#dispaly figure 1
+ggarrange(Gdens,Gsex, Gcomp,Gtemp,Gpre,Gweather)
+```
+
+# 3. Survival temporal trends
+
+We ran 3 nested models for each sex. The most complex model for each sex (Model A) included a non-parametric effect of 'year' and an interaction between 'year' and 'reproductive investment' ('effort season':high [yes] vs. low [no]). For each sex we compared Model A to simpler models that were identical except for the exclusion of the interaction between 'year' and 'reproductive investment' (Model B), and the exclusion of both the interaction term and the non-parametric effect of 'year' (Model C).
+
+## 3.1 Model formulations and results
+
+The variables included in each model are:
+
+Response variable:
+
+-   **survival:** A binomial variable denoting whether the individual survived (1) or died (0) during the 30 day period.
+
+Fixed effects:
+
+-   **JDate:** Number of days from January 1st until the first day of the month survival is measured in. This is included as both first and second order terms using the 'poly()' function.
+
+-   **BirthSznSD:** The total length in days of the mating or birth season currently being experienced, or experienced most recently
+
+-   **effortSeason:** A 2-level categorical variable indicating if survival was measured during a month that majority overlapped with the individual's season of high reproductive investment ('yes') or not ('no').
+
+-   **year:** a non-parametric spline term (only included in models A and B) denoting the year of study (1963 - 2022). Using a penalized thin-plate regression spline, this term estimates the relationship between year and the response variable monthly survival with a number of penalized additive smoothing functions determined by restricted maximum likelihood. For Model A, two splines are estimated, one for the season of high reproductive investment, and one for the season of low reproductive investment.
+
+Random effect:
+
+-   **individual_code:** The unique identifier for the individual who's monthly survival is being measured.
+
+Below see the summary statistics and formulations for each model:
+
+```{r survival temporal trends}
+#we load previously run models since they each take several hours to run
+#female models
+survFemaleYear3<-readRDS("survFemaleYear3.rds") #model C
+survFemaleYear2<-readRDS("survFemaleYear2.rds") #model B
+survFemaleYear1<-readRDS("survFemaleYear1.rds") #model A
+#male models
+survMaleYear3<-readRDS("survMaleYear3.rds") #model C
+survMaleYear2<-readRDS("survMaleYear2.rds") #model B
+survMaleYear1<-readRDS("survMaleYear1.rds") #model A
+
+#the priors for all models was set as follows:
+#for intercept & population-level effects:
+#weakly informative prior normally distributed w/ mean = 0, sd=1
+#random effect prior had standard deviation follow exp. distribution w/ a rate of 1
+prior = c(prior(normal(0, 1), class = "b"),
+  prior(normal(0, 1), class = "Intercept"), 
+ prior(exponential(1), class = "sd")) 
+
+#temporal analysis model summary statistics########################################
+
+#Female Temporal Survival Model A
+survFemaleYear1$formula #model formula
+summary(survFemaleYear1) #summary output
+
+#Female Temporal Survival Model B
+survFemaleYear2$formula #model formula
+summary(survFemaleYear2) #summary output
+
+#Female Temporal Survival Model C 
+survFemaleYear3$formula #model formula
+summary(survFemaleYear3) #summary output
+
+#Male Temporal Survival Model A
+survMaleYear1$formula #model formula
+summary(survMaleYear1) #summary output
+
+#Male Temporal Survival Model B
+survMaleYear2$formula #model formula
+summary(survMaleYear2) #summary output
+
+#Male Temporal Survival Model C 
+survMaleYear3$formula #model formula
+summary(survMaleYear3) #summary output
+```
+
+## 3.2 Model diagnostic checks - example
+
+Here we illustrate one example of model checking and diagnostics using the female temporal survival Model A. We ran similar model checks for all 10 models included in this study.
+
+
+```{r Diagnostics Example}
+#assessing model convergence
+mcmc_plot(survFemaleYear1,type="dens_overlay")+
+  theme(text = element_text(size = 5))
+mcmc_plot(survFemaleYear1,type="trace")+
+  theme(text = element_text(size = 5))
+#chains have converged well
+#estimates are normally distributed
+#small variance of individual code random effect is expected for a survival model
+
+
+#check for rhats deviating 10% larger or smaller than 1.00
+mcmc_plot(survFemaleYear1,type="rhat_hist", binwidth=0.0001)
+#no rhats larger than ~1.005 or below ~0.998
+#indicates good convergence between chains
+
+
+#autocorrelation
+mcmc_plot(survFemaleYear1,type="acf_bar")+
+  theme(text = element_text(size = 5))
+#low autocorrelation at lag > ~5
+
+
+#ratio of effective sample size to N
+mcmc_plot(survFemaleYear1,type="neff_hist",binwidth=0.01)
+#ratios of ESS to N range from 0.7 - 1.1, indicating satisfactory sampling
+
+
+#posterior predictive check 
+#simulates data from the posterior predictive distribution and compares to model predictions
+pp_check(survFemaleYear1, ndraws = 500,type="bars")
+#yrep is very similar to y, indicating robust predictions
+```
+
+## 3.3 WAIC model comparison
+
+For each sex seperately, we compared Models A, B, and C using the widely applicable information criterion (WAIC), calculated using waic.brmsfit from the 'loo' package. When compared across a set of nested models run on the same data, a lower WAIC is indicative of a better fitting model based on the likelihood function. We then calculate the expected log pointwise predictive density (ELPD) between the model with the lowest WAIC and each subsequent model in order to quantify the difference in fit between models.
+
+
+```{r WAIC model comparison}
+#calculate model WAICs for later comparison using the 'waic' function from package 'loo'
+waicF1<-waic(survFemaleYear1)
+waicF2<-waic(survFemaleYear2)
+waicF3<-waic(survFemaleYear3) 
+waicM1<-waic(survMaleYear1)  
+waicM2<-waic(survMaleYear2)  
+waicM3<-waic(survMaleYear3)
+
+#female Model comparison##################################################
+waicF3 #female model C
+waicF2 #female model B
+waicF1 #female model A
+loo_compare(waicF3,waicF2,waicF1)
+#Model A has the lowest WAIC and significantly higher ELPD compared to models B and C
+#this indicates that there is a significant non-parametric effect of year on female survival,
+#and that this effect of year varies between the birth and non-birth seasons
+
+
+
+
+#male Model comparison######################################################
+waicM3 #male model C
+waicM2 #male model B
+waicM1 #male model A
+loo_compare(waicM3,waicM2,waicM1)
+#similar to in the females, Model A has the lowest WAIC,
+#and significantly higher ELPD compared to models B and C
+#this indicates that there is a significant non-parametric effect of year on male survival,
+#and that this effect of year varies between the mating and non-mating seasons
+```
+
+## 3.4 Temporal trends best fit model graphs
+
+Below we show the code to create Figure 2 in the manuscript. This figure illustrates the results of Model A (the best fit model), for each sex. It shows the non-parametric temporal survival patterns for females (Fig. 2A) and males (Fig. 2B) during seasons of high and low reproductive investment.
+
+
+```{r Figure 2 prep,message=FALSE,warning=FALSE,fig.show='hide'}
+
+#females - Model A plot####################################################
+
+#create dataframe that is complete for model
+femYearData<-survivalDataScale %>%
+  filter(individual_sex=="F")%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(effortSeason))%>%
+  filter(!is.na(birthSznSD))%>%
+  filter(!is.na(Jdate))%>%
+  filter(!is.na(individual_code))
+
+#create a table with the average survival organized by year and 'effortSeason'
+#effortSeason = high vs. low reproductive investment
+femYearData<-femYearData%>%
+  group_by(year,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot Figure 2A
+plot<-conditional_effects(survFemaleYear1,effects=c("year:effortSeason"))
+femYear<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.975,1))+
+  geom_point(data=femYearData,aes(x=year,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Year", y="Survival Probability",title = "Female Survival")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", 
+                    labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", 
+                     labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+
+
+
+#males - Model A Plot#########
+
+#create dataframe that is complete for model
+maleYearData<-survivalDataScale %>%
+  filter(individual_sex=="M")%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(effortSeason))%>%
+  filter(!is.na(birthSznSD))%>%
+  filter(!is.na(Jdate))%>%
+  filter(!is.na(individual_code))
+
+#create a table with the average survival organized by year and 'effortSeason'
+maleYearData<-maleYearData%>%
+  group_by(year,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot figure 2B
+plot<-conditional_effects(survMaleYear1,effects=c("year:effortSeason"))
+maleYear<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.975,1))+
+  geom_point(data=maleYearData,aes(x=year,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Year", y="Survival Probability",title = "Male Survival")+
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season", 
+                    labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season", 
+                     labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+```
+
+```{r Figure 2}
+#combine male and female plots#############
+#plot Figure 2
+ggarrange(femYear, maleYear, common.legend=FALSE,legend="top",nrow=1,labels="AUTO")
+```
+
+
+
+
+# 4. Demographic effects on survival
+
+We ran two models estimating the effects of demography on season-specific survival - one model for males and one for females.
+
+## 4.1 Model Formulations and results
+
+The variables included in the models are:
+
+Response variable:
+
+-   **survival:** A binomial variable denoting whether the individual survived (1) or died (0) during the 30 day period.
+
+Fixed effects:
+
+-   **JDate:** Number of days from January 1st until the month from which survival is measured. This is included as both first and second order terms using the 'poly()' function.
+
+-   **effortSeason:** A 2-level categorical variable indicating if survival was measured during a month that majority overlapped with the individual's season of high reproductive investment ('yes') or not ('no').
+
+-   **adultsTotal:** Population density, calculated as the total number of individuals above the age of one year alive on the island in a given month.
+
+-   **age:** Individual age, included as both a 1st order and 2nd order polynomial term using the 'poly()' function. Note that the argument 'raw' in the poly() function is set to "TRUE" such that the age term is not standardized into orthogonal polynomials before the model is run. This is because the 'age' term, like all numeric fixed effects in the model, is already scaled and centered around 0 prior to analysis.
+
+-   **propFemale:** Sex ratio, calculated as the proportion of the adult population (all individuals above the age of 4) that are female, in each given month.
+
+Random effects:
+
+-   **individual_code:** The unique identifier for the individual who's monthly survival is being measured.
+
+-   **year:** The calendar year in which survival is being measured.
+
+Below see the summary statistics and formulations for each model:
+
+```{r demography model summaries}
+#read in models
+survFem3<-readRDS("survFem3.rds") # female demography model
+survMale2B<-readRDS("survMale2B.rds") #male demography model
+
+
+#the prior for all models was set as follows:
+#weakly informative prior normally distributed w/ mean = 0, sd=1 for fixed effects & intercept
+#random effect prior had standard deviation follow exp. distribution w/ a rate of 1
+prior = c(prior(normal(0, 1), class = "b"),
+  prior(normal(0, 1), class = "Intercept"),
+ prior(exponential(1), class = "sd"))
+
+#female demography model summary
+survFem3$formula #model formula
+print(summary(survFem3), digits = 4)
+
+#male demography model summary
+survMale2B$formula #model formula
+print(summary(survMale2B), digits = 4)
+```
+
+## 4.2 Demographic effects graphs
+
+Below we show the code to create Figure 3ABC in the manuscript. This figure illustrates the interaction effects of (A) age and reproductive investment, (B) sex ratio and reproductive investment, and (C) population density and reproductive investment, on female monthly survival probability.
+
+
+```{r Figure 3 prep,message=FALSE,warning=FALSE,fig.show='hide'}
+#female demographic graphs
+
+#create dataframe that is complete for the model
+femDemData<-survivalDataScale %>%
+  filter(!is.na(adultsTotal))%>%
+  filter(!is.na(effortSeason))%>%
+  filter(!is.na(age))%>%
+  filter(censorStatus=="dead")%>%
+  filter(individual_sex=="F")%>%
+  filter(!is.na(propFemale))%>%
+  filter(!is.na(Jdate))%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(individual_code))
+
+#find average survival for binned age categories,for each season
+femDemDataAge<-femDemData%>%
+  mutate(age=round(age,digits=1))%>%
+  group_by(age,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot age X season
+plot<-conditional_effects(survFem3,effects=c("age:effortSeason"))
+femAge<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-1.2,3.4),y=c(0.94,1))+
+  geom_point(data=femDemDataAge,aes(x=age,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Age", y="Survival",title="Females")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", 
+                    labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", 
+                     labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+
+#find average survival for binned sex ratio categories,for each season
+femDemDataSR<-femDemData%>%
+  mutate(propFemale=round(propFemale,digits=1))%>%
+  group_by(propFemale,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot sex ratio X season
+plot<-conditional_effects(survFem3,effects=c("propFemale:effortSeason"))
+femSexRatio<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.94,1))+
+  geom_point(data=femDemDataSR,aes(x=propFemale,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Sex Ratio", y="Survival",title="Females")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", 
+                    labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", 
+                     labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+
+
+#find average survival for binned population density categories,for each season
+femDemDataPD<-femDemData%>%
+  mutate(adultsTotal=round(adultsTotal,digits=1))%>%
+  group_by(adultsTotal,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot population density X season
+plot<-conditional_effects(survFem3,effects=c("adultsTotal:effortSeason"))
+femPopDens<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.94,1))+
+  geom_point(data=femDemDataPD,aes(x=adultsTotal,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Population Density", y="Survival",title="Females")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", 
+                    labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", 
+                     labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+```
+
+Below we show the code to create Figure 3DEF in the manuscript. This figure illustrates the interaction effects of (D) age and reproductive investment, (E) sex ratio and reproductive investment, and (F) population density and reproductive investment, on male monthly survival probability.
+
+```{r Figure 4 prep,message=FALSE,warning=FALSE,fig.show='hide'}
+#male demographic graphs
+
+#create dataframe that is complete for model
+maleDemData<-survivalDataScale %>%
+  filter(!is.na(adultsTotal))%>%
+  filter(!is.na(effortSeason))%>%
+  filter(!is.na(age))%>%
+  filter(censorStatus=="dead")%>%
+  filter(individual_sex=="M")%>%
+  filter(!is.na(propFemale))%>%
+  filter(!is.na(Jdate))%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(individual_code))
+
+#find average survival for binned age categories,for each season
+maleDemDataAge<-maleDemData%>%
+  mutate(age=round(age,digits=1))%>%
+  group_by(age,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot age X season
+plot<-conditional_effects(survMale2B,effects=c("age:effortSeason"))
+maleAge<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-1.2,3.1),y=c(0.94,1))+
+  geom_point(data=maleDemDataAge,aes(x=age,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Age", y="Survival",title="Males")+
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season", 
+                    labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season", 
+                     labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+
+
+#find average survival for binned sex ratio categories,for each season
+maleDemDataSR<-maleDemData%>%
+  mutate(propFemale=round(propFemale,digits=1))%>%
+  group_by(propFemale,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot sex ratio X season
+plot<-conditional_effects(survMale2B,effects=c("propFemale:effortSeason"))
+maleSexRatio<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.94,1))+
+  geom_point(data=maleDemDataSR,aes(x=propFemale,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Sex Ratio", y="Survival",title="Males")+
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season",
+                    labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season",
+                     labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+
+
+#find average survival for binned population density categories,for each season
+maleDemDataPD<-maleDemData%>%
+  mutate(adultsTotal=round(adultsTotal,digits=1))%>%
+  group_by(adultsTotal,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+
+#plot population density X season
+plot<-conditional_effects(survMale2B,effects=c("adultsTotal:effortSeason"))
+malePopDens<-plot(plot)[[1]] +
+  coord_cartesian(y=c(0.94,1))+
+  geom_point(data=maleDemDataPD,aes(x=adultsTotal,y=survival,color=effortSeason),
+             inherit.aes=FALSE)+
+  labs(x="Population Density", y="Survival",title="Males")+  
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season",
+                    labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season", 
+                     labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+```
+
+```{r Figure 3}
+#combine male and females to plot figure 3
+ggarrange(femAge, femSexRatio,femPopDens,maleAge, maleSexRatio,malePopDens, common.legend=FALSE,legend="top",nrow=2,ncol = 3,labels="AUTO",font.label = c(size=20),hjust=-1.5)
+```
+
+
+
+
+# 5. Weather station data comparison
+
+Temperature and rainfall data is freely available from all publicly funded weather stations in Puerto Rico through the National Oceanic and Atmospheric Administration (NOAA) website:
+<https://www.ncei.noaa.gov/cdo-web/>
+
+Before we run the climatic models, we need to check that the weather data used is an adequate representation of the weather conditions experienced on Cayo Santiago. The most complete weather data from the region of Puerto Rico nearest to Cayo Santiago is from the Rio Piedras weather station (41 km from Cayo Santiago). We chose this weather station over the closer weather station of Humacao (6 km from Cayo Santiago) since Humacao only has weather data covering about half of the study length. Here we compare the monthly mean temperatures and rainfall observed at the two stations during the years they do overlap, to ascertain if Rio Piedras station is an adequate approximation of the weather occurring on Cayo Santiago.
+
+## 5.1 Weather station data cleaning
+
+First we clean and combine the data from the two weather stations.
+
+```{r weather station data cleaning}
+#tidy up the Humacao weather station data
+weatherHum<- weatherHum%>% 
+ rename(prcpH=prcp,tmaxH=tmax)%>% #identify precipitation and max temps from Humacao
+  select(date,prcpH,tmaxH)%>%
+  mutate(date1=format(date, "%Y/%m"))
+
+#combine weather data from Humacao and Rio Piedras
+weatherComb<-left_join(weatherHum,select(weatherRP,date,prcp,tmax),by=c("date")) 
+
+#group combined weather data by month
+#summarise the mean rainfall and maximum temperature in each month
+weatherComb<-weatherComb%>%
+  group_by(date1)%>%
+  summarise(prcpH=mean(prcpH),tmaxH=mean(tmaxH),prcp=mean(prcp),tmax=mean(tmax))
+```
+
+## 5.2 Compare Rio Piedras vs. Humacao rainfall
+
+A simple linear regression shows that monthly average rainfall in Rio Piedras (prcp) is highly predictive of monthly average rainfall in Humacao (prcpH) (R\^2 = 0.41, p\<0.001).
+
+```{r weather station rainfall compare}
+#regression of Rio Peiedras precipitation predicting Humacao precipitation
+summary(weather<-lm(prcpH~prcp,data=weatherComb))  
+```
+
+## 5.3 Compare Rio Piedras vs. Humacao temperature
+
+A simple linear regression shows that monthly average maximum temperature (tmax) in Rio Piedras is highly predictive of monthly average maximum temperature in Humacao (tmaxH) (R\^2 = 0.60, p\<0.001)
+
+```{r weather station temperature compare}
+#regression of Rio Peiedras temperature predicting Humacao temperature
+summary(weather1<-lm(tmaxH~tmax,data=weatherComb)) 
+```
+
+# 6. Climatic effects on survival
+
+We ran two models estimating the effects of demography on season-specific survival - one model for males and one for females.
+
+## 6.1 Model Formulations and results
+
+The variables included in the models are:
+
+Response variable:
+
+-   **survival:** A binomial variable denoting whether the individual survived (1) or died (0) during the 30 day period.
+
+Fixed effects:
+
+-   **effortSeason:** A 2-level categorical variable indicating if survival was measured during a month that majority overlapped with the individual's season of high reproductive investment ('yes') or not ('no').
+
+-   **adultsTotal:** Population density, calculated as the total number of individuals above the age of one year alive on the island in each given month
+
+-   **age:** Individual age, included as both a 1st order and 2nd order polynomial term using the 'poly()' function. Note that the argument 'raw' in the poly() function is set to "TRUE" such that the age term is not standardized into orthogonal polynomials before the model is run. This is because the 'age' term, like all numeric fixed effects in the model, is already scaled and centered around 0 prior to analysis.
+
+-   **propFemale:** Sex ratio, calculated as the proportion of the adult population (all individuals above the age of 4) that were female, in each given month.
+
+-   **tmax:** Temperature, calculated as the average of all the daily maximum temperatures in centigrade recorded over the course of the month.
+
+-   **rain:** Rainfall, calculated as the average of all the daily rainfall measures in millimeters recorded over the course of the month.
+
+-   **JDate:** Number of days from January 1st until the month from which survival is measured. This is included as both first and second order terms using the 'poly()' function.
+
+Random effects:
+
+-   **individual_code:** The unique identifier for the individual who's monthly survival is being measured.
+
+-   **year:** The calendar year in which survival is being measured.
+
+Below see the summary statistics and formulations for each model:
+
+
+```{r climate model summaries, warning=FALSE}
+#read in models
+survFemWeather1G<-readRDS("survFemWeather1G.rds") # female climate model
+survMaleWeather1B<-readRDS("survMaleWeather1B.rds") # male climate model
+
+#the prior for both models was set as follows:
+#weakly informative prior normally distributed w/ mean = 0, sd=1 for intercept & fixed effects
+prior = c(prior(normal(0, 1), class = "b"), 
+  prior(normal(0, 1), class = "Intercept"), 
+ prior(exponential(1), class = "sd")) 
+
+#female climate model formula and summary
+formula(survFemWeather1G)
+print(summary(survFemWeather1G), digits = 4)
+
+#male climate model formula and summary
+formula(survMaleWeather1B)
+print(summary(survMaleWeather1B), digits = 4)
+```
+
+## 6.2 Climatic effects graphs
+
+Below we show the code to create Figure 4AB in the manuscript. This figure illustrates the interaction effects of (A) temperature and reproductive investment, and (B) rainfall and reproductive investment, on female monthly survival probability.
+
+```{r Figure 4AB prep,message=FALSE,warning=FALSE,fig.show='hide'}
+#female climate graphs
+
+#check models estimates against raw data
+#create dataframe that is complete for model
+femWeatherData<-survivalDataScale  %>%
+  filter(!is.na(age))%>%
+  filter(!is.na(tmax))%>%
+  filter(!is.na(rain))%>%
+  filter(censorStatus=="dead")%>%
+  filter(individual_sex=="F")%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(individual_code))
+
+#season X tmax
+femWeatherDataTemp<-femWeatherData%>%
+  mutate(tmax=round(tmax,digits=1))%>%
+  group_by(tmax,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+plot<-conditional_effects(survFemWeather1G,effects=c("tmax:effortSeason"))
+femTemp<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-2.1,2),y=c(0.97,1))+
+  geom_point(data=femWeatherDataTemp,aes(x=tmax,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Temperature", y="Survival", title="Females")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+
+#season X rain
+femWeatherDataRain<-femWeatherData%>%
+  mutate(rain=round(rain,digits=1))%>%
+  group_by(rain,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+plot<-conditional_effects(survFemWeather1G,effects=c("rain:effortSeason"))
+femRain<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-1.1,3),y=c(0.97,1))+
+  geom_point(data=femWeatherDataRain,aes(x=rain,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Rainfall", y="Survival", title="Females")+
+  scale_fill_manual(values=c("green4", "red3"),name = "Season", labels = c("Non-Birth", "Birth"))+
+  scale_color_manual(values=c("green4", "red3"),name = "Season", labels = c("Non-Birth", "Birth"))+
+  theme_classic()
+```
+
+
+Below we show the code to create Figure 4CD in the manuscript. This figure illustrates the interaction effects of (A) temperature and reproductive investment, and (B) rainfall and reproductive investment, on male monthly survival probability.
+
+
+```{r Figure 4CD prep,message=FALSE,warning=FALSE,fig.show='hide'}
+#male climate graphs
+
+
+#check models estimates against raw data
+#create dataframe that is complete for model
+maleWeatherData<-survivalDataScale  %>%
+  filter(!is.na(age))%>%
+  filter(!is.na(tmax))%>%
+  filter(!is.na(rain))%>%
+  filter(censorStatus=="dead")%>%
+  filter(individual_sex=="M")%>%
+  filter(!is.na(year))%>%
+  filter(!is.na(individual_code))
+
+#season X tmax
+maleWeatherDataTemp<-maleWeatherData%>%
+  mutate(tmax=round(tmax,digits=1))%>%
+  group_by(tmax,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+plot<-conditional_effects(survMaleWeather1B,effects=c("tmax:effortSeason"))
+maleTemp<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-2.1,2),y=c(0.97,1))+
+  geom_point(data=maleWeatherDataTemp,aes(x=tmax,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Temperature", y="Survival", title="Males")+  
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season", labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season", labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+
+#season X rain
+maleWeatherDataRain<-maleWeatherData%>%
+  mutate(rain=round(rain,digits=1))%>%
+  group_by(rain,effortSeason)%>%
+  summarise(survival=mean(survival),n=n())
+plot<-conditional_effects(survMaleWeather1B,effects=c("rain:effortSeason"))
+maleRain<-plot(plot)[[1]] +
+  coord_cartesian(x=c(-1.1,3),y=c(0.97,1))+
+  geom_point(data=maleWeatherDataRain,aes(x=rain,y=survival,color=effortSeason),inherit.aes=FALSE)+
+  labs(x="Rainfall", y="Survival", title="Males")+ 
+  scale_fill_manual(values=c("purple4", "goldenrod"),name = "Season", labels = c("Non-Mating", "Mating"))+
+  scale_color_manual(values=c("purple4", "goldenrod"),name = "Season", labels = c("Non-Mating", "Mating"))+
+  theme_classic()
+```
+
+```{r Figure 4}
+#plot figure 4
+ggarrange(femTemp, femRain, maleTemp, maleRain, common.legend=FALSE,legend="top",nrow=2,ncol = 2,labels="AUTO")
+```
